@@ -48,7 +48,8 @@ class Editor_Sidebar extends Content_Helper_Feature {
 
 		// Instantiate the features.
 		$this->features = array(
-			'Smart_Linking' => new Smart_Linking( $this ),
+			'Smart_Linking'     => new Smart_Linking( $this ),
+			'Excerpt_Generator' => new Excerpt_Generator( $this->parsely ),
 		);
 	}
 
