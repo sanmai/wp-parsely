@@ -73,6 +73,15 @@ const PostExcerptSuggestions = () => {
 
 	const { editPost } = useDispatch( editorStore );
 
+	/**
+	 * Handles changes to the excerpt suggestions settings.
+	 *
+	 * @since 3.17.0
+	 *
+	 * @param {keyof ExcerptSuggestionsSettingsType} key   The setting key that changed.
+	 *
+	 * @param {string|boolean}                       value The new value of the setting.
+	 */
 	const onSettingChange = ( key: keyof ExcerptSuggestionsSettingsType, value: string | boolean ) => {
 		setSettings( {
 			ExcerptSuggestions: {

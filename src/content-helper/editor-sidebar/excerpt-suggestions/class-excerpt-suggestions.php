@@ -65,7 +65,10 @@ class Excerpt_Suggestions extends Editor_Sidebar_Feature {
 	}
 
 	/**
-	 * Checks and disables the feature if it is disabled via the global or feature filters.
+	 * Checks if the feature is disabled via the global or feature filters.
+	 *
+	 * If the feature is disabled via the global or feature filters, return false,
+	 * thereby disabling the feature.
 	 *
 	 * This throws a deprecated notice if the feature filter name is in use.
 	 *
