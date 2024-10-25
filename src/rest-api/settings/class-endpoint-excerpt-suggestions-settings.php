@@ -26,7 +26,7 @@ class Endpoint_Excerpt_Suggestions_Settings extends Base_Settings_Endpoint {
 	 *
 	 * @return string
 	 */
-	public function get_endpoint_name(): string {
+	public static function get_endpoint_name(): string {
 		return 'excerpt-suggestions';
 	}
 
