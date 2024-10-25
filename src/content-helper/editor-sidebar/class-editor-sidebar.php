@@ -14,7 +14,6 @@ use Parsely\Content_Helper\Editor_Sidebar\Editor_Sidebar_Feature;
 use Parsely\Content_Helper\Editor_Sidebar\Smart_Linking;
 use Parsely\Dashboard_Link;
 use Parsely\Parsely;
-
 use Parsely\REST_API\Settings\Endpoint_Editor_Sidebar_Settings;
 use Parsely\Utils\Utils;
 use WP_Post;
