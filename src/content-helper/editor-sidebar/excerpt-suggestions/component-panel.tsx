@@ -79,7 +79,6 @@ const PostExcerptSuggestions = () => {
 	 * @since 3.17.0
 	 *
 	 * @param {keyof ExcerptSuggestionsSettingsType} key   The setting key that changed.
-	 *
 	 * @param {string|boolean}                       value The new value of the setting.
 	 */
 	const onSettingChange = ( key: keyof ExcerptSuggestionsSettingsType, value: string | boolean ) => {
