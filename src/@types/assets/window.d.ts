@@ -24,12 +24,15 @@ declare global {
 		},
 
 		wpParselyContentHelperSettings: string;
+		wpParselyContentHelperPermissions: string;
 		wpParselyDisableAutotrack?: boolean;
 		wpParselyEmptyCredentialsMessage: string;
 		wpParselyHooks?: _Hooks;
 		wpParselyPostsStatsResponse: string;
 		wpParselyPostUrl: string;
 		wpParselySiteId: string,
+		wpParselySmartLinkingAllowedBlocks: string[];
+		wpParselyTrackableStatuses: string[];
 
 		/**
 		 * Jetpack Editor Initial State.

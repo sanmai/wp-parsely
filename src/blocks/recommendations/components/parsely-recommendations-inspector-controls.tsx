@@ -34,7 +34,7 @@ export const ParselyRecommendationsInspectorControls = ( {
 	}
 
 	return <InspectorControls>
-		<PanelBody title="Settings" initialOpen={ true }>
+		<PanelBody title={ __( 'Settings', 'wp-parsely' ) } initialOpen={ true }>
 			<PanelRow>
 				<TextControl
 					label={ __( 'Title', 'wp-parsely' ) }
@@ -97,7 +97,7 @@ export const ParselyRecommendationsInspectorControls = ( {
 							value: 'pub_date',
 						},
 					] }
-					onChange={ ( value: string ): void => setAttributes( { sort: value } ) }
+					onChange={ ( value ): void => setAttributes( { sort: value } ) }
 				/>
 			</PanelRow>
 		</PanelBody>

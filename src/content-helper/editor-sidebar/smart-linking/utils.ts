@@ -10,9 +10,23 @@ import { dispatch, select } from '@wordpress/data';
  */
 import { dispatchCoreBlockEditor } from '../../../@types/gutenberg/types';
 import { escapeRegExp } from '../../common/utils/functions';
-import { SmartLink } from './provider';
+import { InboundSmartLink, SmartLink } from './provider';
+import { ALLOWED_BLOCKS } from './smart-linking';
 import { SmartLinkingStore } from './store';
 export { escapeRegExp } from '../../common/utils/functions';
+
+/**
+ * Checks if a smart link is an inbound smart link.
+ *
+ * @since 3.16.0
+ *
+ * @param {SmartLink|InboundSmartLink} link The smart link to check.
+ *
+ * @return {link is InboundSmartLink} Whether the smart link is an inbound smart link.
+ */
+export function isInboundSmartLink( link: SmartLink | InboundSmartLink ): link is InboundSmartLink {
+	return ( link as InboundSmartLink ).post_data !== undefined;
+}
 
 /**
  * Finds all text nodes in an element that contain a given search text and are
@@ -85,6 +99,29 @@ function isInsideSimilarNode( node: Node, referenceNode: HTMLElement ): boolean 
 	while ( currentNode ) {
 		// Check by nodeName or any specific attribute.
 		if ( currentNode.nodeName === referenceNode.nodeName ) {
+			return true;
+		}
+		currentNode = currentNode.parentNode;
+	}
+	return false;
+}
+
+/**
+ * Checks if a node is inside a heading (h1, h2, h3, etc.) or a caption element.
+ *
+ * @since 3.16.2
+ *
+ * @param {Node} node The DOM node to check.
+ *
+ * @return {boolean} True if the node is inside a heading or a caption, false otherwise.
+ */
+function isInsideHeadingOrCaption( node: Node ): boolean {
+	let currentNode: Node | null = node;
+	while ( currentNode ) {
+		if (
+			currentNode.nodeName.match( /^H[1-6]$/i ) !== null ||
+			currentNode.nodeName.toLowerCase() === 'figcaption'
+		) {
 			return true;
 		}
 		currentNode = currentNode.parentNode;
@@ -214,10 +251,14 @@ export function sortSmartLinks( smartLinks: SmartLink[] ): SmartLink[] {
 	const notAppliedLinks = smartLinks.filter( ( link ) => ! link.applied );
 
 	const sortByBlockPosition = ( a: SmartLink, b: SmartLink ) => {
-		if ( a.match!.blockPosition === b.match!.blockPosition ) {
-			return a.match!.blockLinkPosition - b.match!.blockLinkPosition;
+		if ( ! a.match || ! b.match ) {
+			return 0;
 		}
-		return a.match!.blockPosition - b.match!.blockPosition;
+
+		if ( a.match.blockPosition === b.match.blockPosition ) {
+			return a.match.blockLinkPosition - b.match.blockLinkPosition;
+		}
+		return a.match.blockPosition - b.match.blockPosition;
 	};
 
 	appliedLinks.sort( sortByBlockPosition );
@@ -336,6 +377,21 @@ export function calculateSmartLinkingMatches(
 
 					if ( occurrenceCount.encountered - 1 === link.offset && occurrenceCount.linked < 1 ) {
 						occurrenceCount.linked++;
+
+						// Skip if the link is inside a non-allowed block.
+						if ( ! ALLOWED_BLOCKS.includes( block.name ) ) {
+							// eslint-disable-next-line no-console
+							console.warn( `PCH Smart Linking: Skipping non-allowed block (${ block.name }):`, link.text );
+							return;
+						}
+
+						// Skip if the node is inside a heading or a caption.
+						if ( isInsideHeadingOrCaption( node ) ) {
+							// eslint-disable-next-line no-console
+							console.warn( `PCH Smart Linking: Skipping heading or caption:`, link.text );
+							return;
+						}
+
 						link.match = {
 							blockId: block.clientId,
 							blockOffset: blockOffsetCounter - 1,
@@ -604,6 +660,44 @@ export async function validateAndFixSmartLinksInBlock( block: BlockInstance ): P
 }
 
 /**
+ * Selects a smart link in the block content.
+ *
+ * This function sets focus to the link element, selects the link text, and
+ * scrolls the viewport to the link element.
+ *
+ * @since 3.16.0
+ *
+ * @param {HTMLElement} blockContent   The block content to select the smart link in.
+ * @param {string}      smartLinkValue The smart link value to select.
+ */
+export const selectSmartLink = ( blockContent: HTMLElement, smartLinkValue: string ): void => {
+	const linkElement = blockContent.querySelector(
+		`a[data-smartlink="${ smartLinkValue }"]`,
+	) as HTMLElement;
+
+	if ( linkElement ) {
+		// Set focus to the link element.
+		linkElement.focus();
+
+		// Select the link.
+		const ownerDocument = blockContent.ownerDocument;
+		const range = ownerDocument.createRange();
+		if ( linkElement.firstChild ) {
+			range.setStart( linkElement.firstChild, 0 ); // Start at the beginning of the link text
+			range.setEndAfter( linkElement.firstChild );
+			const sel = ownerDocument.getSelection();
+			if ( sel ) {
+				sel.removeAllRanges();
+				sel.addRange( range );
+			}
+		}
+
+		// Scroll the viewport to the link element.
+		linkElement.scrollIntoView( { behavior: 'smooth', block: 'center' } );
+	}
+};
+
+/**
  * Trims a URL for display, ensuring it fits within the specified maximum length.
  *
  * @since 3.16.0
@@ -636,4 +730,17 @@ export function trimURLForDisplay( url: string, maxLength: number ): string {
 	const end = path.substring( path.length - partLength );
 
 	return `${ domain }${ start }...${ end }`;
+}
+
+/**
+ * Gets all the URLs from an array of smart links.
+ *
+ * @since 3.16.0
+ *
+ * @param {SmartLink[]} smartLinks The smart links to get the URLs from.
+ *
+ * @return {string[]} The URLs from the smart links.
+ */
+export function getAllSmartLinksURLs( smartLinks: SmartLink[] ): string[] {
+	return smartLinks.map( ( link ) => link.href );
 }

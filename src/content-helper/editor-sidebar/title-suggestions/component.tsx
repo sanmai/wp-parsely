@@ -196,14 +196,7 @@ export const TitleSuggestionsPanel = (): React.JSX.Element => {
 			return;
 		}
 
-		createNotice(
-			'error',
-			__( 'There was an error generating title suggestions.', 'wp-parsely' ),
-			{
-				type: 'snackbar',
-				className: 'parsely-title-suggestion-error',
-			}
-		);
+		error.createErrorSnackbar();
 	}, [ error ] ); // eslint-disable-line react-hooks/exhaustive-deps
 
 	return (
@@ -233,7 +226,7 @@ export const TitleSuggestionsPanel = (): React.JSX.Element => {
 						)
 					) }
 					<Button
-						href="https://docs.parse.ly/plugin-content-helper/#h-title-suggestions-beta"
+						href="https://docs.wpvip.com/parse-ly/wp-parsely-features/title-suggestions/"
 						target="_blank"
 						variant="link"
 					>
@@ -246,7 +239,11 @@ export const TitleSuggestionsPanel = (): React.JSX.Element => {
 					</Button>
 				</div>
 				{ error && (
-					<Notice status="info" className="wp-parsely-content-helper-error">
+					<Notice
+						className="wp-parsely-content-helper-error"
+						onRemove={ () => setError( undefined ) }
+						status="info"
+					>
 						{ error.Message() }
 					</Notice>
 				) }

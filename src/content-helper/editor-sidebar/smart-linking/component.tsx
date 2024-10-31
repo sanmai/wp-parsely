@@ -5,7 +5,7 @@ import { getBlockContent } from '@wordpress/blocks';
 // eslint-disable-next-line import/named
 import { Button, Notice, PanelRow } from '@wordpress/components';
 import { useDebounce } from '@wordpress/compose';
-import { useDispatch, useSelect } from '@wordpress/data';
+import { select, useDispatch, useSelect } from '@wordpress/data';
 import { useEffect, useMemo, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { Icon, external } from '@wordpress/icons';
@@ -15,18 +15,20 @@ import { Icon, external } from '@wordpress/icons';
  */
 import { GutenbergFunction, dispatchCoreEditor } from '../../../@types/gutenberg/types';
 import { Telemetry } from '../../../js/telemetry/telemetry';
-import { ContentHelperErrorCode } from '../../common/content-helper-error';
+import { ContentHelperError, ContentHelperErrorCode } from '../../common/content-helper-error';
 import { SidebarSettings, SmartLinkingSettings, useSettings } from '../../common/settings';
 import { generateProtocolVariants } from '../../common/utils/functions';
+import { ContentHelperPermissions } from '../../common/utils/permissions';
 import { LinkMonitor } from './component-link-monitor';
 import { SmartLinkingSettings as SmartLinkingSettingsComponent } from './component-settings';
-import { useSmartLinksValidation } from './hooks';
+import { useSaveSmartLinksOnPostSave, useSmartLinksValidation } from './hooks';
 import { SmartLink, SmartLinkingProvider } from './provider';
 import { SmartLinkingReviewModal } from './review-modal/component-modal';
 import { ApplyToOptions, SmartLinkingSettingsProps, SmartLinkingStore } from './store';
 import {
 	calculateSmartLinkingMatches,
 	getAllSmartLinksInPost,
+	getAllSmartLinksURLs,
 	validateAndFixSmartLinksInBlock,
 	validateAndFixSmartLinksInPost,
 } from './utils';
@@ -40,6 +42,7 @@ type SmartLinkingPanelProps = {
 	className?: string;
 	selectedBlockClientId?: string;
 	context?: SmartLinkingPanelContext;
+	permissions: ContentHelperPermissions;
 }
 
 /**
@@ -73,11 +76,20 @@ export const SmartLinkingPanel = ( {
 	className,
 	selectedBlockClientId,
 	context = SmartLinkingPanelContext.Unknown,
+	permissions,
 }: Readonly<SmartLinkingPanelProps> ): React.JSX.Element => {
 	const { settings, setSettings } = useSettings<SidebarSettings>();
 
-	// Saving hooks.
-	useSmartLinksValidation();
+	/**
+	 * Saving hooks.
+	 *
+	 * The useSmartLinksValidation hook will validate the smart links before saving the post,
+	 * and the useSaveSmartLinksOnPostSave hook will save the smart links when the post is saved,
+	 * only after the validation is complete.
+	 */
+	const [ validationComplete, setValidationComplete ] = useState<boolean>( false );
+	useSmartLinksValidation( setValidationComplete );
+	useSaveSmartLinksOnPostSave( validationComplete );
 
 	const setSettingsDebounced = useDebounce( setSettings, 500 );
 
@@ -105,6 +117,7 @@ export const SmartLinkingPanel = ( {
 		retrying,
 		retryAttempt,
 		smartLinks,
+		inboundSmartLinks,
 	} = useSelect( ( selectFn ) => {
 		const {
 			isReady,
@@ -120,6 +133,7 @@ export const SmartLinkingPanel = ( {
 			isRetrying,
 			getRetryAttempt,
 			getSmartLinks,
+			getInboundSmartLinks,
 		} = selectFn( SmartLinkingStore );
 		return {
 			ready: isReady(),
@@ -135,6 +149,7 @@ export const SmartLinkingPanel = ( {
 			retrying: isRetrying(),
 			retryAttempt: getRetryAttempt(),
 			smartLinks: getSmartLinks(),
+			inboundSmartLinks: getInboundSmartLinks(),
 		};
 	}, [] );
 
@@ -157,6 +172,7 @@ export const SmartLinkingPanel = ( {
 		setLoading,
 		setError,
 		addSmartLinks,
+		addInboundSmartLinks,
 		addOverlayBlock,
 		removeOverlayBlock,
 		setSmartLinkingSettings,
@@ -168,19 +184,65 @@ export const SmartLinkingPanel = ( {
 		setIsReviewModalOpen,
 	} = useDispatch( SmartLinkingStore );
 
+	const { postId } = useSelect( ( selectFn ) => {
+		const { getCurrentPostId } = selectFn( 'core/editor' ) as GutenbergFunction;
+		return {
+			postId: getCurrentPostId(),
+		};
+	}, [] );
+
 	/**
-	 * Handles the initialization of the Smart Linking existing links.
+	 * Handles the initialization of the Smart Linking existing links by getting the
+	 * existing smart links from the post content and the database.
 	 *
 	 * @since 3.16.0
 	 */
 	useEffect( () => {
-		if ( ! ready ) {
-			const existingSmartLinks = getAllSmartLinksInPost();
+		if ( true !== permissions.SmartLinking ) {
+			return;
+		}
+
+		if ( ready ) {
+			// Return early if the Smart Linking store is already initialized.
+			return;
+		}
+
+		// Get the existing smart links from the post content.
+		const existingSmartLinks = getAllSmartLinksInPost();
+
+		// Get the Smart Links from the database and store them in the Smart Linking store.
+		if ( postId ) {
+			SmartLinkingProvider.getInstance().getSmartLinks( postId ).then( async ( savedSmartLinks ) => {
+				let outboundLinks = savedSmartLinks.outbound;
+				const inboundLinks = savedSmartLinks.inbound;
+
+				// Calculate the smart links matches for each block.
+				const blocks = select( 'core/block-editor' ).getBlocks();
+				outboundLinks = calculateSmartLinkingMatches( blocks, outboundLinks );
+
+				// Add the saved smart links to the store.
+				await addInboundSmartLinks( inboundLinks );
+				return addSmartLinks( outboundLinks );
+			} ).then( () => {
+				// Add the existing smart links to the store.
+				return addSmartLinks( existingSmartLinks );
+			} ).then( () => {
+				setIsReady( true );
+			} );
+		} else {
+			// If there is no post ID, just add the existing smart links to the store.
 			addSmartLinks( existingSmartLinks ).then( () => {
 				setIsReady( true );
 			} );
 		}
-	}, [ addSmartLinks, ready, setIsReady ] );
+	}, [
+		addInboundSmartLinks,
+		addSmartLinks,
+		postId,
+		ready,
+		setIsReady,
+		permissions.SmartLinking,
+	] );
 
 	/**
 	 * Handles the ending of the review process.
@@ -289,8 +351,10 @@ export const SmartLinkingPanel = ( {
 	 * @since 3.16.0
 	 *
 	 * @param {SmartLink[]} links The smart links to process.
+	 *
+	 * @return {Promise<SmartLink[]>} The processed smart links.
 	 */
-	const processSmartLinks = async ( links: SmartLink[] ) => {
+	const processSmartLinks = async ( links: SmartLink[] ): Promise<SmartLink[]> => {
 		// Exclude the links that have been applied already.
 		links = links.filter(
 			( link ) => ! smartLinks.some( ( sl ) => sl.uid === link.uid && sl.applied )
@@ -310,6 +374,28 @@ export const SmartLinkingPanel = ( {
 			return true;
 		} );
 
+		// Exclude Smart Links text and URLs that are already in the post, to avoid duplicates.
+		links = links.filter( ( link ) => {
+			return ! smartLinks.some( ( sl ) => {
+				if ( sl.href === link.href ) {
+					// eslint-disable-next-line no-console
+					console.warn( `PCH Smart Linking: Skipping duplicate link: ${ link.href }` );
+					return true;
+				}
+				if ( sl.text === link.text ) {
+					// If the offset is the same, we want to keep the link, so it can replace the old smart link.
+					if ( sl.offset === link.offset ) {
+						// TODO: Flag smart link as updated.
+						return false;
+					}
+					// eslint-disable-next-line no-console
+					console.warn( `PCH Smart Linking: Skipping duplicate link text: ${ link.text }` );
+					return true;
+				}
+				return false;
+			} );
+		} );
+
 		// Depending on the context, we may need to process all blocks or just the selected one.
 		const blocksToProcess = isFullContent ? allBlocks : [ selectedBlock! ];
 
@@ -320,12 +406,6 @@ export const SmartLinkingPanel = ( {
 
 		// Filter out links without match and smart links being inserted inside another smart link.
 		links = links.filter( ( link ) => {
-			// If the link text and offset are the same, we want to keep the link, so it can replace the old smart link.
-			if ( smartLinks.some( ( sl ) => sl.text === link.text && sl.offset === link.offset ) ) {
-				// TODO: Flag smart link as updated, for now we just remove the old one.
-				return false;
-			}
-
 			if ( ! link.match ) {
 				return false;
 			}
@@ -333,6 +413,10 @@ export const SmartLinkingPanel = ( {
 			const linkEnd = linkStart + link.text.length;
 
 			return ! smartLinks.some( ( sl ) => {
+				if ( ! sl.match ) {
+					return false;
+				}
+
 				if ( link.match!.blockId !== sl.match!.blockId ) {
 					return false;
 				}
@@ -345,6 +429,8 @@ export const SmartLinkingPanel = ( {
 
 		// Update the link suggestions with the new matches.
 		await addSmartLinks( links );
+
+		return links;
 	};
 
 	/**
@@ -383,26 +469,37 @@ export const SmartLinkingPanel = ( {
 		const previousApplyTo = applyTo;
 		try {
 			const generatedLinks = await generateSmartLinksWithRetry( MAX_NUMBER_OF_RETRIES );
-			await processSmartLinks( generatedLinks );
+			const processedSmartLinks = await processSmartLinks( generatedLinks );
+
+			// If after processing the smart links there are no links to suggest, show an error message.
+			if ( processedSmartLinks.length === 0 ) {
+				throw new ContentHelperError(
+					__( 'No smart links were generated.', 'wp-parsely' ),
+					ContentHelperErrorCode.ParselySuggestionsApiNoData,
+					''
+				);
+			}
+
 			setIsReviewModalOpen( true );
 		} catch ( e: any ) { // eslint-disable-line @typescript-eslint/no-explicit-any
-			let snackBarMessage = __( 'There was a problem generating smart links.', 'wp-parsely' );
+			const contentHelperError = new ContentHelperError(
+				e.message ?? 'An unknown error has occurred.',
+				e.code ?? ContentHelperErrorCode.UnknownError
+			);
 
 			// Handle the case where the operation was aborted by the user.
 			if ( e.code && e.code === ContentHelperErrorCode.ParselyAborted ) {
-				snackBarMessage = sprintf(
+				contentHelperError.message = sprintf(
 					/* translators: %d: number of retry attempts, %s: attempt plural */
 					__( 'The Smart Linking process was cancelled after %1$d %2$s.', 'wp-parsely' ),
 					e.numRetries,
 					_n( 'attempt', 'attempts', e.numRetries, 'wp-parsely' )
 				);
-				e.message = snackBarMessage;
 			}
 
-			await setError( e );
-			createNotice( 'error', snackBarMessage, {
-				type: 'snackbar',
-			} );
+			console.error( e ); // eslint-disable-line no-console
+			await setError( contentHelperError );
+			contentHelperError.createErrorSnackbar();
 		} finally {
 			await setLoading( false );
 			await setApplyTo( previousApplyTo );
@@ -430,6 +527,11 @@ export const SmartLinkingPanel = ( {
 
 			const urlExclusionList = generateProtocolVariants( postPermalink );
 
+			// Get all the existing smart links URLs to exclude them from the new smart links.
+			const existingSmartLinksURLs = getAllSmartLinksURLs( smartLinks );
+
+			urlExclusionList.push( ...existingSmartLinksURLs );
+
 			generatedLinks = await SmartLinkingProvider.getInstance().generateSmartLinks(
 				( selectedBlock && ! generatingFullContent )
 					? getBlockContent( selectedBlock )
@@ -443,6 +545,7 @@ export const SmartLinkingPanel = ( {
 				err.numRetries = MAX_NUMBER_OF_RETRIES - retries;
 				throw err;
 			}
+
 			// If the error is a retryable fetch error, retry the fetch.
 			if ( retries > 0 && err.retryFetch ) {
 				// Print the error to the console to help with debugging.
@@ -451,6 +554,7 @@ export const SmartLinkingPanel = ( {
 				await incrementRetryAttempt();
 				return await generateSmartLinksWithRetry( retries - 1 );
 			}
+
 			// Throw the error to be handled elsewhere.
 			throw err;
 		}
@@ -558,7 +662,7 @@ export const SmartLinkingPanel = ( {
 						'wp-parsely',
 					) }
 					<Button
-						href="https://docs.parse.ly/plugin-content-helper/#h-smart-linking-beta"
+						href="https://docs.wpvip.com/parse-ly/wp-parsely-features/smart-linking/"
 						target="_blank"
 						variant="link"
 					>
@@ -575,24 +679,22 @@ export const SmartLinkingPanel = ( {
 						{ error.Message() }
 					</Notice>
 				) }
-				{ ( isReviewDone && numAddedLinks > 0 ) && (
+				{ isReviewDone && numAddedLinks > 0 && (
 					<Notice
 						status="success"
 						onRemove={ () => setIsReviewDone( false ) }
 						className="wp-parsely-smart-linking-suggested-links"
 					>
-						{
-							sprintf(
-								/* translators: 1 - number of smart links generated */
-								__( 'Successfully added %s smart links.', 'wp-parsely' ),
-								numAddedLinks > 0 ? numAddedLinks : suggestedLinks.length,
-							)
-						}
+						{ sprintf(
+							/* translators: 1 - number of smart links generated */
+							__( 'Successfully added %s smart links.', 'wp-parsely' ),
+							numAddedLinks > 0 ? numAddedLinks : suggestedLinks.length,
+						) }
 					</Notice>
 				) }
 				<SmartLinkingSettingsComponent
 					disabled={ loading }
-					selectedBlock={ selectedBlock?.clientId }
+					selectedBlock={ selectedBlock }
 					onSettingChange={ onSettingChange }
 				/>
 				<div className="smart-linking-generate">
@@ -605,17 +707,23 @@ export const SmartLinkingPanel = ( {
 						{ getGenerateButtonMessage() }
 					</Button>
 				</div>
-				{ appliedLinks.length > 0 && (
+				{ ( appliedLinks.length > 0 || inboundSmartLinks.length > 0 ) && (
 					<div className="smart-linking-manage">
 						<Button
 							onClick={ async () => {
 								// Update the smart links in the store.
-								await validateAndFixSmartLinksInPost();
+								const fixedSmartLinks = await validateAndFixSmartLinksInPost();
 								const existingSmartLinks = getAllSmartLinksInPost();
 								await addSmartLinks( existingSmartLinks );
 								setIsReviewModalOpen( true );
+								Telemetry.trackEvent( 'smart_linking_review_pressed', {
+									num_smart_links: smartLinks.length,
+									has_fixed_links: fixedSmartLinks,
+									context,
+								} );
 							} }
 							variant="secondary"
+							disabled={ loading }
 						>
 							{ __( 'Review Smart Links', 'wp-parsely' ) }
 						</Button>
@@ -628,7 +736,7 @@ export const SmartLinkingPanel = ( {
 					isOpen={ reviewModalIsOpen }
 					onAppliedLink={ () => {
 						setNumAddedLinks( ( num ) => num + 1 );
-					}	}
+					} }
 					onClose={ () => {
 						setIsReviewDone( true );
 						setIsReviewModalOpen( false );

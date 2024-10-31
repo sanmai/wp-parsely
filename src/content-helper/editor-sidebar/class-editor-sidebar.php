@@ -10,13 +10,13 @@ declare(strict_types=1);
 
 namespace Parsely\Content_Helper;
 
+use Parsely\Content_Helper\Editor_Sidebar\Editor_Sidebar_Feature;
+use Parsely\Content_Helper\Editor_Sidebar\Smart_Linking;
 use Parsely\Dashboard_Link;
-use Parsely\Endpoints\User_Meta\Editor_Sidebar_Settings_Endpoint;
 use Parsely\Parsely;
-use Parsely\Content_Helper\Content_Helper_Feature;
-
+use Parsely\REST_API\Settings\Endpoint_Editor_Sidebar_Settings;
+use Parsely\Utils\Utils;
 use WP_Post;
-use function Parsely\Utils\get_asset_info;
 
 use const Parsely\PARSELY_FILE;
 
@@ -28,6 +28,15 @@ use const Parsely\PARSELY_FILE;
  */
 class Editor_Sidebar extends Content_Helper_Feature {
 	/**
+	 * Instance of Parsely class.
+	 *
+	 * @since 3.16.0
+	 *
+	 * @var array<Editor_Sidebar_Feature>
+	 */
+	protected $features;
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 3.9.0
@@ -36,6 +45,12 @@ class Editor_Sidebar extends Content_Helper_Feature {
 	 */
 	public function __construct( Parsely $parsely ) {
 		$this->parsely = $parsely;
+
+		// Instantiate the features.
+		$this->features = array(
+			'Smart_Linking'     => new Smart_Linking( $this ),
+			'Excerpt_Generator' => new Excerpt_Suggestions( $this ),
+		);
 	}
 
 	/**
@@ -75,11 +90,13 @@ class Editor_Sidebar extends Content_Helper_Feature {
 	 * Returns the Parse.ly post dashboard URL for the current post.
 	 *
 	 * @since 3.14.0
+	 * @since 3.16.1 Added the $show_utm_params parameter.
 	 *
 	 * @param int|null|WP_Post $post_id The post ID or post object. Default is the current post.
+	 * @param bool             $add_utm_params Whether to add UTM parameters in the URL.
 	 * @return string|null The Parse.ly post dashboard URL, or false if the post ID is invalid.
 	 */
-	private function get_parsely_post_url( $post_id = null ): ?string {
+	private function get_parsely_post_url( $post_id = null, bool $add_utm_params = true ): ?string {
 		// Get permalink for the post.
 		$post_id = $post_id ?? get_the_ID();
 		if ( false === $post_id ) {
@@ -97,7 +114,27 @@ class Editor_Sidebar extends Content_Helper_Feature {
 			return null;
 		}
 
+		if ( ! $add_utm_params ) {
+			return Dashboard_Link::generate_url( $post, $this->parsely->get_site_id() );
+		}
+
 		return Dashboard_Link::generate_url( $post, $this->parsely->get_site_id(), 'wp-page-single', 'editor-sidebar' );
+	}
+
+	/**
+	 * Initializes the features.
+	 *
+	 * @since 3.16.0
+	 */
+	public function init_features(): void {
+		if ( ! $this->can_enable_feature() ) {
+			return;
+		}
+
+		// Initialize the features.
+		foreach ( $this->features as $feature ) {
+			$feature->run();
+		}
 	}
 
 	/**
@@ -110,7 +147,7 @@ class Editor_Sidebar extends Content_Helper_Feature {
 			return;
 		}
 
-		$asset_php        = get_asset_info( 'build/content-helper/editor-sidebar.asset.php' );
+		$asset_php        = Utils::get_asset_info( 'build/content-helper/editor-sidebar.asset.php' );
 		$built_assets_url = plugin_dir_url( PARSELY_FILE ) . 'build/content-helper/';
 
 		wp_enqueue_script(
@@ -121,17 +158,25 @@ class Editor_Sidebar extends Content_Helper_Feature {
 			true
 		);
 
-		$this->inject_inline_scripts( Editor_Sidebar_Settings_Endpoint::get_route() );
+		$this->inject_inline_scripts( Endpoint_Editor_Sidebar_Settings::get_endpoint_name() );
 
-		// Inject inline variables for the editor sidebar.
-		$parsely_post_url = $this->get_parsely_post_url();
+		// Inject inline variables for the editor sidebar, without UTM parameters.
+		$parsely_post_url = $this->get_parsely_post_url( null, false );
 		if ( null !== $parsely_post_url ) {
 			wp_add_inline_script(
 				static::get_script_id(),
-				'wpParselyPostUrl = ' . wp_json_encode( $parsely_post_url ) . ';',
+				'window.wpParselyPostUrl = ' . wp_json_encode( $parsely_post_url ) . ';',
 				'before'
 			);
 		}
+
+		// Inject the trackable statuses.
+		$trackable_statuses = Parsely::get_trackable_statuses();
+		wp_add_inline_script(
+			static::get_script_id(),
+			'window.wpParselyTrackableStatuses = ' . wp_json_encode( $trackable_statuses ) . ';',
+			'before'
+		);
 
 		wp_enqueue_style(
 			static::get_style_id(),

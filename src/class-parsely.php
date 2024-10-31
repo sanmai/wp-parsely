@@ -10,8 +10,12 @@ declare(strict_types=1);
 
 namespace Parsely;
 
+use Parsely\REST_API\REST_API_Controller;
+use Parsely\Services\Content_API\Content_API_Service;
+use Parsely\Services\Suggestions_API\Suggestions_API_Service;
 use Parsely\UI\Metadata_Renderer;
 use Parsely\UI\Settings_Page;
+use Parsely\Utils\Utils;
 use WP_Post;
 
 /**
@@ -27,13 +31,14 @@ use WP_Post;
  *   use_top_level_cats: bool,
  *   custom_taxonomy_section: string,
  *   cats_as_tags: bool,
+ *   content_helper: Parsely_Options_Content_Helper,
  *   track_authenticated_users: bool,
  *   lowercase_tags: bool,
  *   force_https_canonicals: bool,
  *   track_post_types: string[],
  *   track_page_types: string[],
  *   track_post_types_as?: array<string, string>,
- *   full_metadata_in_non_posts: ?bool,
+ *   full_metadata_in_non_posts: bool,
  *   disable_javascript: bool,
  *   disable_amp: bool,
  *   meta_type: string,
@@ -43,13 +48,25 @@ use WP_Post;
  *   plugin_version: string,
  * }
  *
+ * @phpstan-type Parsely_Options_Content_Helper array{
+ *   ai_features_enabled: bool,
+ *   smart_linking: Parsely_Options_Content_Helper_Feature,
+ *   title_suggestions: Parsely_Options_Content_Helper_Feature,
+ *   excerpt_suggestions: Parsely_Options_Content_Helper_Feature,
+ * }
+ *
+ * @phpstan-type Parsely_Options_Content_Helper_Feature array{
+ *   enabled: bool,
+ *   allowed_user_roles: string[],
+ * }
+ *
  * @phpstan-type WP_HTTP_Request_Args array{
- *   method: string,
- *   timeout: float,
- *   blocking: bool,
- *   headers: array<string, string>,
- *   body: string,
- *   data_format: string,
+ *   method?: string,
+ *   timeout?: float,
+ *   blocking?: bool,
+ *   headers?: array<string, string>,
+ *   body?: string,
+ *   data_format?: string,
  * }
  *
  * @phpstan-import-type Metadata_Attributes from Metadata
@@ -58,13 +75,32 @@ class Parsely {
 	/**
 	 * Declare our constants
 	 */
-	public const VERSION                         = PARSELY_VERSION;
-	public const MENU_SLUG                       = 'parsely'; // The page param passed to options-general.php.
-	public const OPTIONS_KEY                     = 'parsely'; // The key used to store options in the WP database.
-	public const CAPABILITY                      = 'manage_options'; // The capability required to administer settings.
-	public const DASHBOARD_BASE_URL              = 'https://dash.parsely.com';
-	public const PUBLIC_API_BASE_URL             = 'https://api.parsely.com/v2';
-	public const PUBLIC_SUGGESTIONS_API_BASE_URL = 'https://content-suggestions-api.parsely.net/prod';
+	public const VERSION            = PARSELY_VERSION;
+	public const MENU_SLUG          = 'parsely'; // The page param passed to options-general.php.
+	public const OPTIONS_KEY        = 'parsely'; // The key used to store options in the WP database.
+	public const CAPABILITY         = 'manage_options'; // The capability required to administer settings.
+	public const DASHBOARD_BASE_URL = 'https://dash.parsely.com';
+
+	/**
+	 * The Content API service.
+	 *
+	 * @var ?Content_API_Service $content_api_service
+	 */
+	private $content_api_service;
+
+	/**
+	 * The Suggestions API service.
+	 *
+	 * @var ?Suggestions_API_Service $suggestions_api_service
+	 */
+	private $suggestions_api_service;
+
+	/**
+	 * The Parse.ly internal REST API controller.
+	 *
+	 * @var REST_API_Controller|null $rest_api_controller
+	 */
+	private $rest_api_controller;
 
 	/**
 	 * Declare some class properties
@@ -78,6 +114,21 @@ class Parsely {
 		'use_top_level_cats'         => false,
 		'custom_taxonomy_section'    => 'category',
 		'cats_as_tags'               => false,
+		'content_helper'             => array(
+			'ai_features_enabled' => true,
+			'smart_linking'       => array(
+				'enabled'            => true,
+				'allowed_user_roles' => array( 'administrator' ),
+			),
+			'title_suggestions'   => array(
+				'enabled'            => true,
+				'allowed_user_roles' => array( 'administrator' ),
+			),
+			'excerpt_suggestions' => array(
+				'enabled'            => true,
+				'allowed_user_roles' => array( 'administrator' ),
+			),
+		),
 		'track_authenticated_users'  => false,
 		'lowercase_tags'             => true,
 		'force_https_canonicals'     => false,
@@ -182,6 +233,32 @@ class Parsely {
 	}
 
 	/**
+	 * Gets the allowed post statuses for tracking.
+	 *
+	 * Uses the `wp_parsely_trackable_statuses` filter to determine which post statuses are allowed to be tracked.
+	 *
+	 * @since 3.17.0
+	 *
+	 * @param WP_Post|int|null $post The post object.
+	 * @return array<string> The allowed post statuses.
+	 */
+	public static function get_trackable_statuses( $post = null ): array {
+		/**
+		 * Filters the statuses that are permitted to be tracked.
+		 *
+		 * By default, the only status tracked is 'publish'. Use this filter if
+		 * you have other published content that has a different (custom) status.
+		 *
+		 * @since 2.5.0
+		 * @since 3.17.0 Filter extracted to a separate method.
+		 *
+		 * @param string[]         $trackable_statuses The list of post statuses that are allowed to be tracked.
+		 * @param WP_Post|int|null $post               Which post object or ID is being checked.
+		 */
+		return apply_filters( 'wp_parsely_trackable_statuses', array( 'publish' ), $post );
+	}
+
+	/**
 	 * Registers action and filter hook callbacks, and immediately upgrades
 	 * options if needed.
 	 */
@@ -206,6 +283,57 @@ class Parsely {
 		}
 
 		add_action( 'save_post', array( $this, 'update_metadata_endpoint' ) );
+	}
+
+	/**
+	 * Returns the Content API service.
+	 *
+	 * This method returns the Content API service, which is used to interact with the Parse.ly Content API.
+	 *
+	 * @since 3.17.0
+	 *
+	 * @return Content_API_Service
+	 */
+	public function get_content_api(): Content_API_Service {
+		if ( ! isset( $this->content_api_service ) ) {
+			$this->content_api_service = new Content_API_Service( $this );
+		}
+
+		return $this->content_api_service;
+	}
+
+	/**
+	 * Returns the Suggestions API service.
+	 *
+	 * This method returns the Suggestions API service, which is used to interact with the Parse.ly Suggestions API.
+	 *
+	 * @since 3.17.0
+	 *
+	 * @return Suggestions_API_Service
+	 */
+	public function get_suggestions_api(): Suggestions_API_Service {
+		if ( ! isset( $this->suggestions_api_service ) ) {
+			$this->suggestions_api_service = new Suggestions_API_Service( $this );
+		}
+
+		return $this->suggestions_api_service;
+	}
+
+	/**
+	 * Gets the REST API controller.
+	 *
+	 * If the controller is not set, a new instance is created.
+	 *
+	 * @since 3.17.0
+	 *
+	 * @return REST_API_Controller
+	 */
+	public function get_rest_api_controller(): REST_API_Controller {
+		if ( ! isset( $this->rest_api_controller ) ) {
+			$this->rest_api_controller = new REST_API_Controller( $this );
+		}
+
+		return $this->rest_api_controller;
 	}
 
 	/**
@@ -292,18 +420,7 @@ class Parsely {
 			return false;
 		}
 
-		/**
-		 * Filters the statuses that are permitted to be tracked.
-		 *
-		 * By default, the only status tracked is 'publish'. Use this filter if
-		 * you have other published content that has a different (custom) status.
-		 *
-		 * @since 2.5.0
-		 *
-		 * @param string[]    $trackable_statuses The list of post statuses that are allowed to be tracked.
-		 * @param int|WP_Post $post               Which post object or ID is being checked.
-		 */
-		$statuses          = apply_filters( 'wp_parsely_trackable_statuses', array( 'publish' ), $post );
+		$statuses          = self::get_trackable_statuses( $post );
 		$cache[ $post_id ] = in_array( get_post_status( $post ), $statuses, true );
 		return $cache[ $post_id ];
 	}
@@ -355,7 +472,8 @@ class Parsely {
 			'tags'          => $metadata['keywords'] ?? '',
 		);
 
-		$parsely_api_endpoint    = self::PUBLIC_API_BASE_URL . '/metadata/posts';
+		$parsely_api_base_url    = Content_API_Service::get_base_url();
+		$parsely_api_endpoint    = $parsely_api_base_url . '/metadata/posts';
 		$parsely_metadata_secret = $parsely_options['metadata_secret'];
 
 		$headers = array( 'Content-Type' => 'application/json' );
@@ -405,10 +523,19 @@ class Parsely {
 		 */
 		$options = get_option( self::OPTIONS_KEY, null );
 
+		// @phpstan-ignore isset.offset, booleanAnd.alwaysFalse
 		if ( is_array( $options ) && ! isset( $options['full_metadata_in_non_posts'] ) ) {
+			// Existing plugin installation without full metadata option.
 			$this->set_default_full_metadata_in_non_posts();
 		}
 
+		// @phpstan-ignore isset.offset, booleanAnd.alwaysFalse
+		if ( is_array( $options ) && ! isset( $options['content_helper'] ) ) {
+			// Existing plugin installation without Content Helper options.
+			$this->set_default_content_helper_settings_values();
+		}
+
+		// New plugin installation that hasn't saved its options yet.
 		if ( ! is_array( $options ) ) {
 			$this->set_default_track_as_values();
 			$this->set_default_full_metadata_in_non_posts();
@@ -426,6 +553,28 @@ class Parsely {
 			$this->get_managed_credentials(),
 			$this->managed_options
 		);
+	}
+
+	/**
+	 * Returns the value of a nested option.
+	 *
+	 * @since 3.16.0
+	 *
+	 * @param string          $option  The option to get.
+	 * @param Parsely_Options $options The options to get the value from.
+	 * @return mixed The value of the nested option.
+	 */
+	public static function get_nested_option_value( $option, $options ) {
+		$keys  = explode( '[', str_replace( ']', '', $option ) );
+		$value = $options;
+
+		foreach ( $keys as $key ) {
+			if ( isset( $value[ $key ] ) ) {
+				$value = $value[ $key ];
+			}
+		}
+
+		return $value;
 	}
 
 	/**
@@ -480,6 +629,22 @@ class Parsely {
 				break;
 			}
 		}
+	}
+
+	/**
+	 * Sets the default values for Content Helper options.
+	 *
+	 * Gives PCH access to all users having the edit_posts capability, to keep
+	 * consistent behavior with plugin versions prior to 3.16.0.
+	 *
+	 * @since 3.16.0
+	 */
+	public function set_default_content_helper_settings_values(): void {
+		$this->option_defaults['content_helper'] =
+		Permissions::build_pch_permissions_settings_array(
+			true,
+			array_keys( Permissions::get_user_roles_with_edit_posts_cap() )
+		);
 	}
 
 	/**
@@ -862,8 +1027,8 @@ class Parsely {
 	private function allow_parsely_remote_requests(): void {
 		$allowed_urls = array(
 			self::DASHBOARD_BASE_URL,
-			self::PUBLIC_API_BASE_URL,
-			self::PUBLIC_SUGGESTIONS_API_BASE_URL,
+			Content_API_Service::get_base_url(),
+			Suggestions_API_Service::get_base_url(),
 		);
 
 		add_filter(
@@ -871,7 +1036,7 @@ class Parsely {
 			function ( $external, $host, $url ) use ( $allowed_urls ) {
 				// Check if the URL matches any URLs on the allowed list.
 				foreach ( $allowed_urls as $allowed_url ) {
-					if ( \Parsely\Utils\str_starts_with( $url, $allowed_url ) ) {
+					if ( Utils::str_starts_with( $url, $allowed_url ) ) {
 						return true;
 					}
 				}
